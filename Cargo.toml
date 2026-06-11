@@ -1,0 +1,12 @@
+[package]
+name = "struct_importer"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "struct_importer"
+crate-type = ["cdylib"]
+
+[dependencies]
+dbgeng = "0.5.1"
+anyhow = "1"
