@@ -553,7 +553,7 @@ fn parse_raw_fields(tokens: &[Token], pos: &mut usize) -> Vec<RawItem> {
 
 // ── Struct definition parser ──────────────────────────────────────────────────
 
-fn try_parse_struct_block(tokens: &[Token], pos: &mut usize) -> Option<Vec<StructDef>> {
+fn try_parse_struct_block(tokens: &[Token], pos: &mut usize) -> Option<(Vec<String>, Vec<RawItem>, bool)> {
     let start = *pos;
 
     // Optional `typedef`
@@ -639,12 +639,7 @@ fn try_parse_struct_block(tokens: &[Token], pos: &mut usize) -> Option<Vec<Struc
         return None;
     }
 
-    let results = all_names
-        .into_iter()
-        .map(|name| build_struct_def(name, &raw_items, is_union))
-        .collect();
-
-    Some(results)
+    Some((all_names, raw_items, is_union))
 }
 
 // ── Layout computation ────────────────────────────────────────────────────────
@@ -675,6 +670,7 @@ fn layout_items(
     is_union: bool,
     base: usize,
     ptr_size: usize,
+    registry: &Registry,
 ) -> (Vec<Field>, usize, usize) {
     let mut fields = Vec::new();
     let mut offset = base;
@@ -686,8 +682,8 @@ fn layout_items(
         match item {
             RawItem::Field(raw) => {
                 let ty = resolve_raw_type(raw);
-                let field_size = ty.byte_size(ptr_size).max(1);
-                let field_align = ty.align_of(ptr_size).max(1);
+                let field_size = registry.resolve_size(&ty, ptr_size).max(1);
+                let field_align = registry.resolve_align(&ty, ptr_size).max(1);
                 max_align = max_align.max(field_align);
 
                 let cur_base = if is_union { base } else { offset };
@@ -740,7 +736,7 @@ fn layout_items(
                 bf_state = None;
                 let group_base = if is_union { base } else { offset };
                 let (nested_fields, group_size, group_align) =
-                    layout_items(nested, true, group_base, ptr_size);
+                    layout_items(nested, true, group_base, ptr_size, registry);
                 max_align = max_align.max(group_align);
                 fields.extend(nested_fields);
                 max_size = max_size.max(group_size);
@@ -753,7 +749,7 @@ fn layout_items(
                 bf_state = None;
                 let group_base = if is_union { base } else { offset };
                 let (nested_fields, group_size, group_align) =
-                    layout_items(nested, false, group_base, ptr_size);
+                    layout_items(nested, false, group_base, ptr_size, registry);
                 max_align = max_align.max(group_align);
                 fields.extend(nested_fields);
                 max_size = max_size.max(group_size);
@@ -768,10 +764,11 @@ fn layout_items(
     (fields, size, max_align)
 }
 
-fn build_struct_def(name: String, raw_items: &[RawItem], is_union: bool) -> StructDef {
-    let (fields, size, max_align) = layout_items(raw_items, is_union, 0, PTR_SIZE);
-    let total_size = align_up(size, max_align.max(1));
-    StructDef { name, fields, total_size }
+fn build_struct_def(name: String, raw_items: &[RawItem], is_union: bool, registry: &Registry) -> StructDef {
+    let (fields, size, max_align) = layout_items(raw_items, is_union, 0, PTR_SIZE, registry);
+    let align = max_align.max(1);
+    let total_size = align_up(size, align);
+    StructDef { name, fields, total_size, align }
 }
 
 // ── Public entry point ────────────────────────────────────────────────────────
@@ -779,19 +776,31 @@ fn build_struct_def(name: String, raw_items: &[RawItem], is_union: bool) -> Stru
 pub fn parse_header(source: &str, registry: &mut Registry) -> usize {
     let tokens = tokenize(source);
     let mut pos = 0;
-    let mut count = 0;
+    let mut pending: Vec<(Vec<String>, Vec<RawItem>, bool)> = Vec::new();
 
+    // Pass 1: parse all struct bodies into raw items without computing layout
     while pos < tokens.len() {
-        if let Some(defs) = try_parse_struct_block(&tokens, &mut pos) {
-            count += defs.len();
-            for def in defs {
-                registry.insert(def);
-            }
+        if let Some(raw) = try_parse_struct_block(&tokens, &mut pos) {
+            pending.push(raw);
         } else {
             pos += 1;
         }
     }
 
+    // Pass 2: build layout with the registry so Named type sizes are resolved.
+    // Types are inserted as they're built so later types in the same paste can
+    // see earlier ones.
+    let mut count = 0;
+    for (names, raw_items, is_union) in &pending {
+        count += names.len();
+        let def = build_struct_def(names[0].clone(), &raw_items, *is_union, registry);
+        registry.insert(def.clone());
+        for name in names.iter().skip(1) {
+            let mut alias = def.clone();
+            alias.name = name.clone();
+            registry.insert(alias);
+        }
+    }
     count
 }
 
@@ -869,5 +878,37 @@ mod tests {
         assert_eq!(def.fields[1].offset, 4); // b (aligned to 4)
         assert_eq!(def.fields[2].offset, 8); // c
         assert_eq!(def.total_size, 12);
+    }
+
+    #[test]
+    fn named_struct_field_size_resolved_from_registry() {
+        // IN_ADDR is 4 bytes. SOCKADDR_IN embeds it; the field after it (sin_zero)
+        // must start at offset 8, not offset 5 (the bug: Named size defaulted to 1).
+        let src = "
+            typedef struct _IN_ADDR {
+                union {
+                    struct { UCHAR s_b1; UCHAR s_b2; UCHAR s_b3; UCHAR s_b4; } S_un_b;
+                    struct { USHORT s_w1; USHORT s_w2; } S_un_w;
+                    ULONG S_addr;
+                } S_un;
+            } IN_ADDR;
+
+            typedef struct _SOCKADDR_IN {
+                USHORT sin_family;
+                USHORT sin_port;
+                IN_ADDR sin_addr;
+                UCHAR sin_zero[8];
+            } SOCKADDR_IN;
+        ";
+        let reg = parse(src);
+        let in_addr = reg.get("IN_ADDR").unwrap();
+        assert_eq!(in_addr.total_size, 4, "IN_ADDR must be 4 bytes");
+
+        let sa = reg.get("SOCKADDR_IN").unwrap();
+        let sin_addr = sa.fields.iter().find(|f| f.name == "sin_addr").unwrap();
+        let sin_zero = sa.fields.iter().find(|f| f.name == "sin_zero").unwrap();
+        assert_eq!(sin_addr.offset, 4, "sin_addr at +0x04");
+        assert_eq!(sin_zero.offset, 8, "sin_zero at +0x08, not +0x05");
+        assert_eq!(sa.total_size, 16);
     }
 }

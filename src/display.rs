@@ -1,6 +1,5 @@
 use anyhow::Result;
 use dbgeng::client::DebugClient;
-use dbgeng::dlogln;
 use dbgeng::windows::core::{Interface, IUnknown, PCSTR};
 use dbgeng::windows::Win32::System::Diagnostics::Debug::Extensions::{
     IDebugControl, DEBUG_OUTCTL_AMBIENT_DML, DEBUG_OUTPUT_NORMAL,
@@ -27,7 +26,7 @@ pub fn display_struct(
             if let FieldType::Named(nested_name) = &field.ty {
                 if let Some(nested_def) = registry.get(nested_name) {
                     let nested_name = nested_def.name.clone();
-                    dlogln!(dbg, "{}   +{:#06x} {:<20} : {}", pad, field.offset, field.name, nested_name)?;
+                    dbg.log(format!("{}   +{:#06x} {:<20} : {}\n", pad, field.offset, field.name, nested_name))?;
                     let nested = registry.get(&nested_name).unwrap();
                     display_struct(dbg, unk, registry, nested, field_addr, indent + 1, ptr_size)?;
                     continue;
@@ -70,15 +69,14 @@ pub fn display_struct(
 
         match (field.bit_offset, field.bit_size) {
             (Some(bo), Some(bs)) => {
-                dlogln!(
-                    dbg,
-                    "{}   +{:#06x} {:<20} : {} [Pos {}, {} Bit{}]",
+                dbg.log(format!(
+                    "{}   +{:#06x} {:<20} : {} [Pos {}, {} Bit{}]\n",
                     pad, field.offset, field.name, value_str,
                     bo, bs, if bs == 1 { "" } else { "s" }
-                )?;
+                ))?;
             }
             _ => {
-                dlogln!(dbg, "{}   +{:#06x} {:<20} : {}", pad, field.offset, field.name, value_str)?;
+                dbg.log(format!("{}   +{:#06x} {:<20} : {}\n", pad, field.offset, field.name, value_str))?;
             }
         }
     }

@@ -100,6 +100,7 @@ pub struct StructDef {
     pub name: String,
     pub fields: Vec<Field>,
     pub total_size: usize,
+    pub align: usize,
 }
 
 #[derive(Debug, Default)]
@@ -130,6 +131,14 @@ impl Registry {
             FieldType::Named(name) => self.get(name).map(|s| s.total_size).unwrap_or(ptr_size),
             FieldType::Arr(inner, n) => self.resolve_size(inner, ptr_size) * n,
             other => other.byte_size(ptr_size),
+        }
+    }
+
+    pub fn resolve_align(&self, ty: &FieldType, ptr_size: usize) -> usize {
+        match ty {
+            FieldType::Named(name) => self.get(name).map(|s| s.align).unwrap_or(1),
+            FieldType::Arr(inner, _) => self.resolve_align(inner, ptr_size),
+            other => other.align_of(ptr_size),
         }
     }
 

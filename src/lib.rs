@@ -7,7 +7,6 @@ use std::ffi::{c_void, CStr};
 use std::sync::{LazyLock, Mutex};
 
 use dbgeng::client::DebugClient;
-use dbgeng::dlogln;
 use dbgeng::windows::core::{Interface, IUnknown, HRESULT, PCSTR};
 use dbgeng::windows::Win32::Foundation::{E_ABORT, S_OK};
 
@@ -38,14 +37,14 @@ extern "C" fn importhdr(raw_client: RawClient, args: PCSTR) -> HRESULT {
     wrap(raw_client, args, |dbg, _unk, args| {
         let path = args.trim();
         if path.is_empty() {
-            dlogln!(dbg, "Usage: !importhdr <path_to_header.h>")?;
+            dbg.log("Usage: !importhdr <path_to_header.h>\n")?;
             return Ok(());
         }
 
         let source = std::fs::read_to_string(path)?;
         let mut reg = REGISTRY.lock().unwrap();
         let count = parser::parse_header(&source, &mut reg);
-        dlogln!(dbg, "Imported {} struct definition(s) from \"{}\"", count, path)?;
+        dbg.log(format!("Imported {} struct definition(s) from \"{}\"\n", count, path))?;
 
         if count > 0 {
             register_synthetic_types(dbg, &reg)?;
@@ -64,14 +63,14 @@ extern "C" fn dt(raw_client: RawClient, args: PCSTR) -> HRESULT {
         let struct_name = match parts.next() {
             Some(s) => s,
             None => {
-                dlogln!(dbg, "Usage: !dt <StructName> <address>")?;
+                dbg.log("Usage: !dt <StructName> <address>\n")?;
                 return Ok(());
             }
         };
         let addr_str = match parts.next() {
             Some(s) => s,
             None => {
-                dlogln!(dbg, "Usage: !dt <StructName> <address>")?;
+                dbg.log("Usage: !dt <StructName> <address>\n")?;
                 return Ok(());
             }
         };
@@ -81,7 +80,7 @@ extern "C" fn dt(raw_client: RawClient, args: PCSTR) -> HRESULT {
 
         match reg.get(struct_name).cloned() {
             Some(def) => {
-                dlogln!(dbg, "{} @ 0x{:016x}  (size = 0x{:x})", def.name, addr, def.total_size)?;
+                dbg.log(format!("{} @ 0x{:016x}  (size = 0x{:x})\n", def.name, addr, def.total_size))?;
                 display::display_struct(dbg, unk, &reg, &def, addr, 0, 8)?;
             }
             None => {
@@ -99,11 +98,11 @@ extern "C" fn liststructs(raw_client: RawClient, _args: PCSTR) -> HRESULT {
         let reg = REGISTRY.lock().unwrap();
         let names = reg.list_names();
         if names.is_empty() {
-            dlogln!(dbg, "No structs loaded. Use !importhdr <header.h>.")?;
+            dbg.log("No structs loaded. Use !importhdr <header.h>.\n")?;
         } else {
-            dlogln!(dbg, "Loaded structs ({}):", names.len())?;
+            dbg.log(format!("Loaded structs ({}):\n", names.len()))?;
             for name in names {
-                dlogln!(dbg, "  {}", name)?;
+                dbg.log(format!("  {}\n", name))?;
             }
         }
         Ok(())
@@ -115,7 +114,7 @@ extern "C" fn liststructs(raw_client: RawClient, _args: PCSTR) -> HRESULT {
 extern "C" fn clearstructs(raw_client: RawClient, _args: PCSTR) -> HRESULT {
     wrap(raw_client, PCSTR(std::ptr::null()), |dbg, _unk, _| {
         *REGISTRY.lock().unwrap() = Registry::default();
-        dlogln!(dbg, "All struct definitions cleared.")?;
+        dbg.log("All struct definitions cleared.\n")?;
         Ok(())
     })
 }
@@ -151,10 +150,7 @@ fn register_synthetic_types(dbg: &DebugClient, reg: &Registry) -> anyhow::Result
     // Force symbol reload for the synthetic module
     let _ = dbg.exec(".reload /f struct_importer");
 
-    dlogln!(
-        dbg,
-        "Types registered — use: dt struct_importer!StructName 0xaddr  (or dt StructName 0xaddr)"
-    )?;
+    dbg.log("Types registered — use: dt struct_importer!StructName 0xaddr  (or dt StructName 0xaddr)\n")?;
     Ok(())
 }
 
@@ -181,7 +177,7 @@ fn wrap(
     match callback(&dbg, unk, &args_str) {
         Ok(()) => S_OK,
         Err(e) => {
-            let _ = dlogln!(dbg, "Error: {:#}", e);
+            let _ = dbg.log(format!("Error: {:#}\n", e));
             E_ABORT
         }
     }
